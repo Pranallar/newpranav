@@ -243,17 +243,11 @@ async def run_live():
     """Main loop: read EEG from headset → classify → send to game."""
 
     # Load the trained model
-    if not MODEL_PATH.exists():
-        print(f"\nERROR: No trained model found at {MODEL_PATH}")
-        print("Train one first: python train.py recording.xdf")
-        sys.exit(1)
-
-    bundle = joblib.load(MODEL_PATH)
-    if isinstance(bundle, dict):
-        model = bundle["pipeline"]
-    else:
-        model = bundle
-    log.info(f"Model loaded from {MODEL_PATH}")
+    # We skip loading model.pkl — the pre-trained model doesn't generalize
+    # to a new person/headset. Instead, we use live alpha-power thresholding:
+    # High alpha (8-13 Hz) → relaxation (eyes closed, calm)
+    # Low alpha (suppressed) → concentration (mental math, focus)
+    log.info("Using LIVE alpha-power classifier (no model needed)")
 
     # Connect to headset
     inlet, sfreq, ch_indices = find_eeg_stream()
@@ -269,37 +263,93 @@ async def run_live():
     log.info("\nWaiting for browser to connect...")
     while not WS_CLIENTS:
         await asyncio.sleep(0.3)
-    log.info("Browser connected! Starting predictions...\n")
-    await asyncio.sleep(1)
+    log.info("Browser connected!")
+
+    # Calibration phase: collect baseline alpha for 10 seconds
+    log.info("\n" + "=" * 50)
+    log.info("  CALIBRATING: Sit still and RELAX for 10 seconds")
+    log.info("  (close eyes, breathe normally)")
+    log.info("=" * 50 + "\n")
+
+    await send_to_game({"state": "calibrating", "n": 0})
 
     # Rolling buffer for EEG data
     n_ch = len(ch_indices)
-    buffer = np.zeros((n_ch, n_buffer))  # (channels, samples)
+    buffer = np.zeros((n_ch, n_buffer))
     samples_collected = 0
 
-    # Smoothing: require N consecutive same-predictions
-    recent_preds = deque(maxlen=SMOOTHING_WINDOW)
+    # Collect calibration samples
+    calib_alphas = []
+    calib_start = time.time()
+    while time.time() - calib_start < 12:  # 12 seconds calibration
+        samples, timestamps = inlet.pull_chunk(timeout=0.0)
+        if samples:
+            samples = np.array(samples)
+            new_data = samples[:, ch_indices].T
+            n_new = new_data.shape[1]
+            if n_new >= n_buffer:
+                buffer = new_data[:, -n_buffer:]
+            else:
+                buffer = np.roll(buffer, -n_new, axis=1)
+                buffer[:, -n_new:] = new_data
+            samples_collected += n_new
+
+        if samples_collected >= n_buffer and time.time() - calib_start > 2:
+            filtered = apply_filters(buffer.copy(), sos_bp, b_notch, a_notch)
+            # Compute alpha power across all channels
+            alpha_powers = []
+            for ch in range(filtered.shape[0]):
+                f, pxx = welch(filtered[ch], fs=sfreq, nperseg=min(filtered.shape[1], int(sfreq)))
+                alpha_mask = (f >= 8) & (f <= 13)
+                if alpha_mask.sum() > 0:
+                    alpha_powers.append(pxx[alpha_mask].mean())
+            if alpha_powers:
+                avg_alpha = np.mean(alpha_powers)
+                calib_alphas.append(avg_alpha)
+                remaining = max(0, 12 - (time.time() - calib_start))
+                log.info(f"  Calibrating... alpha={avg_alpha:.2e}  ({remaining:.0f}s left)")
+
+        await asyncio.sleep(0.5)
+
+    if not calib_alphas:
+        log.error("No calibration data! Using defaults.")
+        baseline_alpha = 1e-12
+    else:
+        baseline_alpha = np.median(calib_alphas)
+
+    # Threshold: if alpha drops below 60% of baseline → concentrating
+    threshold = baseline_alpha * 0.70
+    log.info(f"\n  Calibration complete!")
+    log.info(f"  Baseline alpha: {baseline_alpha:.2e}")
+    log.info(f"  Threshold: {threshold:.2e}")
+    log.info(f"  Alpha ABOVE threshold → relaxation")
+    log.info(f"  Alpha BELOW threshold → concentration")
+    log.info(f"\n{'='*50}")
+    log.info(f"  NOW: Concentrate (mental math) or relax (close eyes)")
+    log.info(f"{'='*50}\n")
+
+    # Smoothing — reduced to 2 for faster response
+    recent_preds = deque(maxlen=2)
     current_state = "neutral"
     total_preds = 0
     last_predict_time = time.time()
+
+    # FIXED baseline from calibration (does NOT adapt)
+    fixed_baseline = baseline_alpha
 
     while True:
         # Pull available samples from the headset
         samples, timestamps = inlet.pull_chunk(timeout=0.0)
 
         if samples:
-            samples = np.array(samples)  # (n_pulled, n_all_channels)
-            # Select only our scalp channels
-            new_data = samples[:, ch_indices].T  # (n_ch, n_pulled)
+            samples = np.array(samples)
+            new_data = samples[:, ch_indices].T
             n_new = new_data.shape[1]
-
-            # Shift buffer left and append new data
             if n_new >= n_buffer:
                 buffer = new_data[:, -n_buffer:]
             else:
                 buffer = np.roll(buffer, -n_new, axis=1)
                 buffer[:, -n_new:] = new_data
-
             samples_collected += n_new
 
         # Predict every PREDICT_EVERY seconds
@@ -310,43 +360,54 @@ async def run_live():
             # Filter the buffer
             filtered = apply_filters(buffer.copy(), sos_bp, b_notch, a_notch)
 
-            # Scale to Volts if needed (Blackbird typically sends µV)
-            p99 = np.percentile(np.abs(filtered), 99)
-            if p99 > 1e-3:
-                filtered = filtered * 1e-6  # µV → V
+            # Compute alpha AND beta power across all EEG channels
+            alpha_powers = []
+            beta_powers = []
+            for ch in range(filtered.shape[0]):
+                f, pxx = welch(filtered[ch], fs=sfreq, nperseg=min(filtered.shape[1], int(sfreq)))
+                alpha_mask = (f >= 8) & (f <= 13)
+                beta_mask = (f >= 13) & (f <= 30)
+                if alpha_mask.sum() > 0:
+                    alpha_powers.append(pxx[alpha_mask].mean())
+                if beta_mask.sum() > 0:
+                    beta_powers.append(pxx[beta_mask].mean())
 
-            # Extract features and predict
-            features = extract_features(filtered, sfreq)
-            pred_label = model.predict(features)[0]
-            pred_name = "relaxation" if pred_label == 1 else "concentration"
+            current_alpha = np.mean(alpha_powers) if alpha_powers else 0
+            current_beta = np.mean(beta_powers) if beta_powers else 0
 
-            # Try to get prediction probability if available
-            prob_str = ""
-            try:
-                probs = model.predict_proba(features)[0]
-                prob_str = f"  probs=[conc:{probs[0]:.0%} relax:{probs[1]:.0%}]"
-            except Exception:
-                pass
+            # Beta/Alpha ratio: concentration → beta goes UP, alpha goes DOWN
+            # So a HIGHER ratio = more concentration
+            ba_ratio = current_beta / (current_alpha + 1e-30)
 
-            # Smoothing: only switch state if N consecutive predictions agree
+            # Simple classification:
+            # Use FIXED baseline — if alpha drops below 90% of relaxation baseline
+            # OR if beta/alpha ratio is high → concentration
+            alpha_drop = current_alpha < (fixed_baseline * 0.90)
+            high_engagement = ba_ratio > 1.5  # beta dominates alpha
+
+            if alpha_drop or high_engagement:
+                pred_name = "concentration"
+            else:
+                pred_name = "relaxation"
+
+            # Smoothing
             recent_preds.append(pred_name)
-            if len(recent_preds) == SMOOTHING_WINDOW and len(set(recent_preds)) == 1:
+            if len(set(recent_preds)) == 1:
                 current_state = recent_preds[0]
 
             total_preds += 1
 
-            # Log with debug info every 10 predictions
+            # Display
             symbol = "R" if current_state == "concentration" else "G"
-            if total_preds <= 5 or total_preds % 10 == 0:
-                raw_amp = np.percentile(np.abs(buffer), 99)
-                # Show alpha power (8-13 Hz) which is the key signal
-                f_welch, pxx = welch(filtered[0], fs=sfreq, nperseg=min(filtered.shape[1], int(sfreq)))
-                alpha_mask = (f_welch >= 8) & (f_welch <= 13)
-                alpha_pwr = pxx[alpha_mask].mean() if alpha_mask.sum() > 0 else 0
-                log.info(f"  [{symbol}] {pred_name:15s}{prob_str}")
-                log.info(f"       signal={raw_amp:.1f}µV  alpha={alpha_pwr:.2e}  n={total_preds}")
+            alpha_pct = (current_alpha / fixed_baseline * 100) if fixed_baseline > 0 else 0
+
+            raw_amp = np.percentile(np.abs(buffer), 99)
+            if total_preds <= 15 or total_preds % 5 == 0:
+                log.info(f"  [{symbol}] {current_state:15s}  alpha={alpha_pct:.0f}%baseline  "
+                         f"β/α={ba_ratio:.2f}  sig={raw_amp:.0f}µV  n={total_preds}")
             else:
-                log.info(f"  [{symbol}] {current_state:15s}  (raw: {pred_name}{prob_str}, n={total_preds})")
+                log.info(f"  [{symbol}] {current_state:15s}  alpha={alpha_pct:.0f}%  "
+                         f"β/α={ba_ratio:.2f}  n={total_preds}")
 
             await send_to_game({
                 "state": current_state,
