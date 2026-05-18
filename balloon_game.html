@@ -221,8 +221,8 @@
     <script>
         // ── Game state ──────────────────────────────────────────────────
         let balloonSize = 0.5;  // 0 = popped, 1 = max
-        const INFLATE_RATE = 0.008;
-        const DEFLATE_RATE = 0.006;
+        const INFLATE_RATE = 0.015;
+        const DEFLATE_RATE = 0.012;
         let currentState = 'neutral';  // 'concentration', 'relaxation', 'neutral'
         let predictionCount = 0;
         let particles = [];
@@ -531,10 +531,13 @@
                 let d;
                 try { d = JSON.parse(raw); } catch(e) { d = {state: raw.trim()}; }
                 const st = d.state;
-                // Directly update game state
-                currentState = st;
+                console.log('WS received:', st, d);
+                // Only update if it's a real state (not calibrating/neutral)
+                if (st === 'concentration' || st === 'relaxation') {
+                    currentState = st;
+                }
                 predictionCount = d.n || (predictionCount + 1);
-                // Direct DOM updates as backup
+                // Direct DOM updates
                 const stateEl = document.getElementById('stateLabel');
                 const predEl = document.getElementById('predCount');
                 const dotEl = document.getElementById('brainDot');
@@ -551,6 +554,10 @@
                     stateEl.className = 'stat-value relax';
                     dotEl.className = 'brain-dot relax';
                     lblEl.textContent = 'Relaxation detected';
+                } else if (st === 'calibrating') {
+                    stateEl.textContent = '⏳ Calibrating...';
+                    stateEl.className = 'stat-value neutral';
+                    lblEl.textContent = 'Relax and close eyes for 10s';
                 }
                 confEl.textContent = d.truth
                     ? `${st} (truth: ${d.truth}) Acc: ${d.acc}`
@@ -559,7 +566,8 @@
             ws.onclose = () => {
                 btn.classList.remove('active');
                 btn.textContent = '🔌 Reconnecting…';
-                console.log('WS closed, reconnecting in 2s…');
+                console.log('WS closed, reconnecting in 2s… (keeping state:', currentState, ')');
+                // DON'T reset currentState — keep balloon moving during reconnect
                 setTimeout(autoConnect, 2000);
             };
             ws.onerror = () => {};
