@@ -1,0 +1,576 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>EEG Balloon Controller</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700;900&display=swap" rel="stylesheet">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        body {
+            font-family: 'Inter', sans-serif;
+            background: linear-gradient(135deg, #0f0c29 0%, #1a1a4e 40%, #24243e 100%);
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            overflow: hidden;
+            color: #e0e0ff;
+        }
+
+        /* Header */
+        .header {
+            text-align: center;
+            padding: 20px 0 10px;
+            z-index: 10;
+        }
+        .header h1 {
+            font-size: 1.8rem;
+            font-weight: 900;
+            background: linear-gradient(90deg, #a78bfa, #60a5fa, #34d399);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            letter-spacing: -0.5px;
+        }
+        .header p { font-size: 0.85rem; opacity: 0.5; margin-top: 4px; }
+
+        /* Status bar */
+        .status-bar {
+            display: flex;
+            gap: 24px;
+            padding: 12px 28px;
+            background: rgba(255,255,255,0.04);
+            border-radius: 16px;
+            border: 1px solid rgba(255,255,255,0.06);
+            backdrop-filter: blur(10px);
+            margin: 10px 0;
+            z-index: 10;
+        }
+        .stat { text-align: center; }
+        .stat-label { font-size: 0.65rem; text-transform: uppercase; letter-spacing: 1px; opacity: 0.4; }
+        .stat-value { font-size: 1.3rem; font-weight: 700; margin-top: 2px; }
+        .stat-value.conc { color: #f87171; }
+        .stat-value.relax { color: #34d399; }
+        .stat-value.neutral { color: #a78bfa; }
+
+        /* Canvas area */
+        .game-area {
+            flex: 1;
+            width: 100%;
+            position: relative;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        canvas {
+            width: 100%;
+            height: 100%;
+            position: absolute;
+            top: 0; left: 0;
+        }
+
+        /* Brain state indicator */
+        .brain-state {
+            position: fixed;
+            bottom: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            display: flex;
+            align-items: center;
+            gap: 16px;
+            padding: 14px 32px;
+            background: rgba(0,0,0,0.5);
+            border-radius: 20px;
+            border: 1px solid rgba(255,255,255,0.08);
+            backdrop-filter: blur(12px);
+            z-index: 20;
+        }
+        .brain-dot {
+            width: 14px; height: 14px;
+            border-radius: 50%;
+            background: #6b7280;
+            transition: background 0.3s, box-shadow 0.3s;
+        }
+        .brain-dot.conc {
+            background: #f87171;
+            box-shadow: 0 0 16px #f8717180;
+        }
+        .brain-dot.relax {
+            background: #34d399;
+            box-shadow: 0 0 16px #34d39980;
+        }
+        .brain-label {
+            font-size: 0.95rem;
+            font-weight: 600;
+            min-width: 160px;
+        }
+        .brain-conf {
+            font-size: 0.75rem;
+            opacity: 0.5;
+        }
+
+        /* Connection controls */
+        .controls {
+            position: fixed;
+            top: 12px;
+            right: 16px;
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+            z-index: 30;
+        }
+        .btn {
+            padding: 8px 18px;
+            border: 1px solid rgba(255,255,255,0.15);
+            background: rgba(255,255,255,0.06);
+            color: #e0e0ff;
+            border-radius: 10px;
+            font-family: 'Inter', sans-serif;
+            font-size: 0.8rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s;
+            backdrop-filter: blur(8px);
+        }
+        .btn:hover { background: rgba(255,255,255,0.12); transform: translateY(-1px); }
+        .btn.active { border-color: #34d399; color: #34d399; }
+        .btn.sim { border-color: #a78bfa; color: #a78bfa; }
+
+        /* Alpha wave visualizer */
+        .wave-bar {
+            position: fixed;
+            bottom: 80px;
+            left: 50%;
+            transform: translateX(-50%);
+            width: 300px;
+            height: 6px;
+            background: rgba(255,255,255,0.05);
+            border-radius: 3px;
+            overflow: hidden;
+            z-index: 20;
+        }
+        .wave-fill {
+            height: 100%;
+            width: 50%;
+            background: linear-gradient(90deg, #f87171, #a78bfa, #34d399);
+            border-radius: 3px;
+            transition: width 0.5s ease;
+        }
+        .wave-labels {
+            position: fixed;
+            bottom: 90px;
+            left: 50%;
+            transform: translateX(-50%);
+            width: 300px;
+            display: flex;
+            justify-content: space-between;
+            font-size: 0.6rem;
+            opacity: 0.35;
+            z-index: 20;
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>🧠 EEG Balloon Controller</h1>
+        <p>Concentrate to inflate · Relax to deflate</p>
+    </div>
+
+    <div class="status-bar">
+        <div class="stat">
+            <div class="stat-label">State</div>
+            <div class="stat-value neutral" id="stateLabel">Waiting…</div>
+        </div>
+        <div class="stat">
+            <div class="stat-label">Balloon Size</div>
+            <div class="stat-value" id="sizeLabel">50%</div>
+        </div>
+        <div class="stat">
+            <div class="stat-label">Predictions</div>
+            <div class="stat-value" id="predCount">0</div>
+        </div>
+        <div class="stat">
+            <div class="stat-label">Source</div>
+            <div class="stat-value" id="sourceLabel" style="font-size:0.85rem">—</div>
+        </div>
+    </div>
+
+    <div class="game-area">
+        <canvas id="gameCanvas"></canvas>
+    </div>
+
+    <div class="wave-labels"><span>Concentration</span><span>Alpha Power</span><span>Relaxation</span></div>
+    <div class="wave-bar"><div class="wave-fill" id="waveFill"></div></div>
+
+    <div class="brain-state">
+        <div class="brain-dot" id="brainDot"></div>
+        <div>
+            <div class="brain-label" id="brainLabel">No signal</div>
+            <div class="brain-conf" id="brainConf">Waiting for input…</div>
+        </div>
+    </div>
+
+    <div class="controls">
+        <button class="btn sim" id="btnSim" onclick="toggleSimulation()">▶ Simulate</button>
+        <button class="btn" id="btnUDP" onclick="connectUDP()">🔌 Connect UDP</button>
+        <button class="btn" id="btnKey" onclick="toggleKeyboard()">⌨ Keyboard</button>
+    </div>
+
+    <script>
+        // ── Game state ──────────────────────────────────────────────────
+        let balloonSize = 0.5;  // 0 = popped, 1 = max
+        const INFLATE_RATE = 0.008;
+        const DEFLATE_RATE = 0.006;
+        let currentState = 'neutral';  // 'concentration', 'relaxation', 'neutral'
+        let predictionCount = 0;
+        let particles = [];
+        let stars = [];
+        let simRunning = false;
+        let simInterval = null;
+        let keyboardMode = false;
+        let udpSocket = null;
+
+        // ── Canvas setup ────────────────────────────────────────────────
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+
+        function resizeCanvas() {
+            canvas.width = window.innerWidth;
+            canvas.height = window.innerHeight;
+        }
+        window.addEventListener('resize', resizeCanvas);
+        resizeCanvas();
+
+        // Generate stars
+        for (let i = 0; i < 80; i++) {
+            stars.push({
+                x: Math.random() * canvas.width,
+                y: Math.random() * canvas.height,
+                r: Math.random() * 1.5 + 0.5,
+                twinkle: Math.random() * Math.PI * 2,
+                speed: Math.random() * 0.02 + 0.005
+            });
+        }
+
+        // ── Drawing ─────────────────────────────────────────────────────
+        function drawBalloon(cx, cy, radius) {
+            // Glow
+            const glowColor = currentState === 'concentration' ? 'rgba(248,113,113,0.15)' :
+                              currentState === 'relaxation' ? 'rgba(52,211,153,0.12)' : 'rgba(167,139,250,0.1)';
+            const glow = ctx.createRadialGradient(cx, cy, radius * 0.5, cx, cy, radius * 2);
+            glow.addColorStop(0, glowColor);
+            glow.addColorStop(1, 'transparent');
+            ctx.fillStyle = glow;
+            ctx.fillRect(cx - radius * 2, cy - radius * 2, radius * 4, radius * 4);
+
+            // Balloon body
+            const grad = ctx.createRadialGradient(cx - radius * 0.3, cy - radius * 0.3, radius * 0.1, cx, cy, radius);
+            if (currentState === 'concentration') {
+                grad.addColorStop(0, '#fca5a5');
+                grad.addColorStop(0.5, '#ef4444');
+                grad.addColorStop(1, '#991b1b');
+            } else if (currentState === 'relaxation') {
+                grad.addColorStop(0, '#6ee7b7');
+                grad.addColorStop(0.5, '#10b981');
+                grad.addColorStop(1, '#065f46');
+            } else {
+                grad.addColorStop(0, '#c4b5fd');
+                grad.addColorStop(0.5, '#8b5cf6');
+                grad.addColorStop(1, '#4c1d95');
+            }
+
+            ctx.beginPath();
+            ctx.ellipse(cx, cy, radius * 0.85, radius, 0, 0, Math.PI * 2);
+            ctx.fillStyle = grad;
+            ctx.fill();
+
+            // Highlight
+            ctx.beginPath();
+            ctx.ellipse(cx - radius * 0.25, cy - radius * 0.35, radius * 0.15, radius * 0.25, -0.4, 0, Math.PI * 2);
+            ctx.fillStyle = 'rgba(255,255,255,0.25)';
+            ctx.fill();
+
+            // String
+            ctx.beginPath();
+            ctx.moveTo(cx, cy + radius);
+            ctx.quadraticCurveTo(cx + 8, cy + radius + 30, cx - 3, cy + radius + 60);
+            ctx.quadraticCurveTo(cx - 10, cy + radius + 90, cx + 5, cy + radius + 120);
+            ctx.strokeStyle = 'rgba(255,255,255,0.2)';
+            ctx.lineWidth = 1.5;
+            ctx.stroke();
+
+            // Knot
+            ctx.beginPath();
+            ctx.arc(cx, cy + radius + 4, 4, 0, Math.PI * 2);
+            ctx.fillStyle = 'rgba(255,255,255,0.15)';
+            ctx.fill();
+
+            // Size text on balloon
+            const pct = Math.round(balloonSize * 100);
+            ctx.fillStyle = 'rgba(255,255,255,0.6)';
+            ctx.font = `${Math.max(14, radius * 0.25)}px Inter`;
+            ctx.textAlign = 'center';
+            ctx.fillText(`${pct}%`, cx, cy + 6);
+        }
+
+        function spawnParticles(cx, cy, radius) {
+            if (Math.random() > 0.3) return;
+            const angle = Math.random() * Math.PI * 2;
+            const dist = radius + Math.random() * 20;
+            particles.push({
+                x: cx + Math.cos(angle) * dist,
+                y: cy + Math.sin(angle) * dist,
+                vx: Math.cos(angle) * 0.5,
+                vy: Math.sin(angle) * 0.5 - 0.5,
+                life: 1.0,
+                color: currentState === 'concentration' ? '#f87171' :
+                       currentState === 'relaxation' ? '#34d399' : '#a78bfa',
+                r: Math.random() * 3 + 1
+            });
+        }
+
+        function drawFrame() {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+            // Stars
+            const time = Date.now() * 0.001;
+            stars.forEach(s => {
+                const alpha = 0.3 + 0.3 * Math.sin(s.twinkle + time * s.speed * 10);
+                ctx.beginPath();
+                ctx.arc(s.x, s.y, s.r, 0, Math.PI * 2);
+                ctx.fillStyle = `rgba(200,200,255,${alpha})`;
+                ctx.fill();
+            });
+
+            // Balloon
+            const cx = canvas.width / 2;
+            const baseY = canvas.height * 0.45;
+            const minR = 30, maxR = Math.min(canvas.width, canvas.height) * 0.28;
+            const radius = minR + (maxR - minR) * balloonSize;
+            const floatOffset = Math.sin(time * 1.2) * 8;
+
+            drawBalloon(cx, baseY + floatOffset, radius);
+            spawnParticles(cx, baseY + floatOffset, radius);
+
+            // Particles
+            particles = particles.filter(p => p.life > 0);
+            particles.forEach(p => {
+                p.x += p.vx;
+                p.y += p.vy;
+                p.life -= 0.015;
+                ctx.beginPath();
+                ctx.arc(p.x, p.y, p.r * p.life, 0, Math.PI * 2);
+                ctx.fillStyle = p.color + Math.round(p.life * 80).toString(16).padStart(2, '0');
+                ctx.fill();
+            });
+
+            // Update balloon size
+            if (currentState === 'concentration') {
+                balloonSize = Math.min(1, balloonSize + INFLATE_RATE);
+            } else if (currentState === 'relaxation') {
+                balloonSize = Math.max(0.05, balloonSize - DEFLATE_RATE);
+            }
+
+            // Pop effect
+            if (balloonSize >= 0.99) {
+                for (let i = 0; i < 20; i++) {
+                    const angle = Math.random() * Math.PI * 2;
+                    particles.push({
+                        x: cx, y: baseY,
+                        vx: Math.cos(angle) * (2 + Math.random() * 4),
+                        vy: Math.sin(angle) * (2 + Math.random() * 4),
+                        life: 1.0, color: '#fbbf24',
+                        r: Math.random() * 5 + 2
+                    });
+                }
+                balloonSize = 0.1;
+            }
+
+            updateUI();
+            requestAnimationFrame(drawFrame);
+        }
+
+        // ── UI updates ──────────────────────────────────────────────────
+        function updateUI() {
+            const stateLabel = document.getElementById('stateLabel');
+            const sizeLabel = document.getElementById('sizeLabel');
+            const predCountEl = document.getElementById('predCount');
+            const brainDot = document.getElementById('brainDot');
+            const brainLabel = document.getElementById('brainLabel');
+            const waveFill = document.getElementById('waveFill');
+
+            sizeLabel.textContent = Math.round(balloonSize * 100) + '%';
+            predCountEl.textContent = predictionCount;
+
+            stateLabel.className = 'stat-value ' +
+                (currentState === 'concentration' ? 'conc' :
+                 currentState === 'relaxation' ? 'relax' : 'neutral');
+            stateLabel.textContent = currentState === 'concentration' ? '🔴 Concentrating' :
+                                     currentState === 'relaxation' ? '🟢 Relaxing' : '⚪ Waiting…';
+
+            brainDot.className = 'brain-dot ' +
+                (currentState === 'concentration' ? 'conc' :
+                 currentState === 'relaxation' ? 'relax' : '');
+            brainLabel.textContent = currentState === 'concentration' ? 'Concentration detected' :
+                                     currentState === 'relaxation' ? 'Relaxation detected' : 'No signal';
+
+            const pct = currentState === 'concentration' ? '20%' :
+                        currentState === 'relaxation' ? '80%' : '50%';
+            waveFill.style.width = pct;
+        }
+
+        // ── Input modes ─────────────────────────────────────────────────
+
+        // 1. SIMULATION — cycles through states automatically
+        function toggleSimulation() {
+            if (simRunning) {
+                clearInterval(simInterval);
+                simRunning = false;
+                currentState = 'neutral';
+                document.getElementById('btnSim').textContent = '▶ Simulate';
+                document.getElementById('btnSim').classList.remove('active');
+                document.getElementById('sourceLabel').textContent = '—';
+                return;
+            }
+            simRunning = true;
+            document.getElementById('btnSim').textContent = '⏹ Stop Sim';
+            document.getElementById('btnSim').classList.add('active');
+            document.getElementById('sourceLabel').textContent = 'Simulation';
+
+            let simStates = ['concentration', 'relaxation'];
+            let idx = 0;
+            currentState = simStates[0];
+            predictionCount++;
+
+            simInterval = setInterval(() => {
+                idx = (idx + 1) % simStates.length;
+                currentState = simStates[idx];
+                predictionCount++;
+                document.getElementById('brainConf').textContent =
+                    `Simulated prediction #${predictionCount}`;
+            }, 3000);  // Switch every 3 seconds
+        }
+
+        // 2. KEYBOARD — press C for concentrate, R for relax
+        function toggleKeyboard() {
+            keyboardMode = !keyboardMode;
+            const btn = document.getElementById('btnKey');
+            if (keyboardMode) {
+                btn.classList.add('active');
+                btn.textContent = '⌨ Keys ON';
+                document.getElementById('sourceLabel').textContent = 'Keyboard';
+                document.getElementById('brainConf').textContent = 'Press C=concentrate, R=relax';
+            } else {
+                btn.classList.remove('active');
+                btn.textContent = '⌨ Keyboard';
+                currentState = 'neutral';
+            }
+        }
+
+        document.addEventListener('keydown', (e) => {
+            if (!keyboardMode) return;
+            if (e.key.toLowerCase() === 'c') {
+                currentState = 'concentration';
+                predictionCount++;
+                document.getElementById('brainConf').textContent = 'Key: C → Concentration';
+            } else if (e.key.toLowerCase() === 'r') {
+                currentState = 'relaxation';
+                predictionCount++;
+                document.getElementById('brainConf').textContent = 'Key: R → Relaxation';
+            }
+        });
+        document.addEventListener('keyup', (e) => {
+            if (!keyboardMode) return;
+            if (e.key.toLowerCase() === 'c' || e.key.toLowerCase() === 'r') {
+                currentState = 'neutral';
+            }
+        });
+
+        // 3. WebSocket — auto-connect to ws://localhost:5006
+        function handlePrediction(raw) {
+            let state, n, info;
+            try {
+                const d = (typeof raw === 'string') ? JSON.parse(raw) : raw;
+                state = d.state;
+                n = d.n;
+                info = d.truth
+                    ? `Pred: ${d.state} | Truth: ${d.truth} | Acc: ${d.acc}`
+                    : `Pred: ${d.state}`;
+            } catch(e) {
+                const msg = String(raw).trim().toLowerCase();
+                state = msg;
+                n = predictionCount + 1;
+                info = `Pred: ${msg}`;
+            }
+            // Force update globals
+            if (state === 'concentration') {
+                currentState = 'concentration';
+            } else if (state === 'relaxation') {
+                currentState = 'relaxation';
+            }
+            predictionCount = n || (predictionCount + 1);
+            document.getElementById('brainConf').textContent = info;
+        }
+
+        function autoConnect() {
+            const btn = document.getElementById('btnUDP');
+            const ws = new WebSocket('ws://127.0.0.1:5006');
+            udpSocket = ws;
+
+            ws.onopen = () => {
+                btn.classList.add('active');
+                btn.textContent = '🔌 Connected';
+                document.getElementById('sourceLabel').textContent = 'Live EEG';
+                document.getElementById('brainConf').textContent = 'Connected! Receiving predictions…';
+                console.log('WebSocket connected!');
+            };
+            ws.onmessage = (event) => {
+                const raw = event.data;
+                let d;
+                try { d = JSON.parse(raw); } catch(e) { d = {state: raw.trim()}; }
+                const st = d.state;
+                // Directly update game state
+                currentState = st;
+                predictionCount = d.n || (predictionCount + 1);
+                // Direct DOM updates as backup
+                const stateEl = document.getElementById('stateLabel');
+                const predEl = document.getElementById('predCount');
+                const dotEl = document.getElementById('brainDot');
+                const lblEl = document.getElementById('brainLabel');
+                const confEl = document.getElementById('brainConf');
+                predEl.textContent = predictionCount;
+                if (st === 'concentration') {
+                    stateEl.textContent = '🔴 Concentrating';
+                    stateEl.className = 'stat-value conc';
+                    dotEl.className = 'brain-dot conc';
+                    lblEl.textContent = 'Concentration detected';
+                } else if (st === 'relaxation') {
+                    stateEl.textContent = '🟢 Relaxing';
+                    stateEl.className = 'stat-value relax';
+                    dotEl.className = 'brain-dot relax';
+                    lblEl.textContent = 'Relaxation detected';
+                }
+                confEl.textContent = d.truth
+                    ? `${st} (truth: ${d.truth}) Acc: ${d.acc}`
+                    : st;
+            };
+            ws.onclose = () => {
+                btn.classList.remove('active');
+                btn.textContent = '🔌 Reconnecting…';
+                console.log('WS closed, reconnecting in 2s…');
+                setTimeout(autoConnect, 2000);
+            };
+            ws.onerror = () => {};
+        }
+
+        function connectUDP() { autoConnect(); }
+
+        // ── Start ───────────────────────────────────────────────────────
+        drawFrame();
+        // Auto-connect after 1 second
+        setTimeout(autoConnect, 1000);
+    </script>
+</body>
+</html>
