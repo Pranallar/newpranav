@@ -320,6 +320,14 @@ async def run_live():
             pred_label = model.predict(features)[0]
             pred_name = "relaxation" if pred_label == 1 else "concentration"
 
+            # Try to get prediction probability if available
+            prob_str = ""
+            try:
+                probs = model.predict_proba(features)[0]
+                prob_str = f"  probs=[conc:{probs[0]:.0%} relax:{probs[1]:.0%}]"
+            except Exception:
+                pass
+
             # Smoothing: only switch state if N consecutive predictions agree
             recent_preds.append(pred_name)
             if len(recent_preds) == SMOOTHING_WINDOW and len(set(recent_preds)) == 1:
@@ -327,10 +335,18 @@ async def run_live():
 
             total_preds += 1
 
-            # Log and send
+            # Log with debug info every 10 predictions
             symbol = "R" if current_state == "concentration" else "G"
-            log.info(f"  [{symbol}] {current_state:15s}  (raw: {pred_name}, "
-                     f"buffer: {list(recent_preds)}, n={total_preds})")
+            if total_preds <= 5 or total_preds % 10 == 0:
+                raw_amp = np.percentile(np.abs(buffer), 99)
+                # Show alpha power (8-13 Hz) which is the key signal
+                f_welch, pxx = welch(filtered[0], fs=sfreq, nperseg=min(filtered.shape[1], int(sfreq)))
+                alpha_mask = (f_welch >= 8) & (f_welch <= 13)
+                alpha_pwr = pxx[alpha_mask].mean() if alpha_mask.sum() > 0 else 0
+                log.info(f"  [{symbol}] {pred_name:15s}{prob_str}")
+                log.info(f"       signal={raw_amp:.1f}µV  alpha={alpha_pwr:.2e}  n={total_preds}")
+            else:
+                log.info(f"  [{symbol}] {current_state:15s}  (raw: {pred_name}{prob_str}, n={total_preds})")
 
             await send_to_game({
                 "state": current_state,
